@@ -1,0 +1,9 @@
+torch
+transformers
+datasets
+peft
+accelerate
+evaluate
+rouge_score
+bert_score
+tqdm
