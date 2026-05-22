@@ -20,9 +20,9 @@ MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
 TRAIN_FILE = "data/train.jsonl"
 VALID_FILE = "data/valid.jsonl"
 
-OUTPUT_DIR = "outputs/qwen_summarizer"
-# Nếu dùng LLaMA:
-# OUTPUT_DIR = "outputs/llama_summarizer"
+# OUTPUT_DIR = "outputs/qwen_summarizer"
+
+OUTPUT_DIR = "outputs/llama_summarizer"
 
 MAX_LENGTH = 1024
 MAX_PROMPT_LENGTH = 768
