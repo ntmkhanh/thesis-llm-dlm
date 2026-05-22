@@ -4,7 +4,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
 BASE_MODEL = "meta-llama/Llama-3.2-3B-Instruct"
-ADAPTER = "outputs/llama_summarizer/final"
+ADAPTER = "outputs/llama_summarizer/qwen_summarizer/final"
 
 tokenizer = AutoTokenizer.from_pretrained(ADAPTER)
 tokenizer.pad_token = tokenizer.eos_token
