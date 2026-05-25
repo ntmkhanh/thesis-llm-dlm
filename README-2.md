@@ -22,7 +22,7 @@ PP2: DiffuSeq sinh summary draft
 Qwen/LLaMA polish
    ↓
 Đánh giá PP2
-##1. Cài đặt môi trường
+## 1. Cài đặt môi trường
 python -m venv venv
 source venv/bin/activate      # Linux
 # hoặc
@@ -47,8 +47,8 @@ Mỗi dòng có dạng:
   "article": "...",
   "reference": "..."
 }
-##3. Fine-tune Qwen/LLaMA Summarizer
-###3.1 Fine-tune Qwen
+## 3. Fine-tune Qwen/LLaMA Summarizer
+### 3.1 Fine-tune Qwen
 python 1_finetune_llm.py
 Mặc định dùng:
 Qwen/Qwen2.5-1.5B-Instruct
