@@ -22,7 +22,7 @@ PP2: DiffuSeq sinh summary draft
 Qwen/LLaMA polish
    ↓
 Đánh giá PP2
-1. Cài đặt môi trường
+##1. Cài đặt môi trường
 python -m venv venv
 source venv/bin/activate      # Linux
 # hoặc
@@ -34,7 +34,7 @@ git clone https://github.com/Shark-NLP/DiffuSeq.git
 cd DiffuSeq
 pip install -r requirements.txt
 cd ..
-2. Chuẩn bị dữ liệu CNN/DailyMail
+##2. Chuẩn bị dữ liệu CNN/DailyMail
 Chạy:
 python 0_prepare_data.py
 Sau bước này sẽ có:
@@ -47,20 +47,20 @@ Mỗi dòng có dạng:
   "article": "...",
   "reference": "..."
 }
-3. Fine-tune Qwen/LLaMA Summarizer
-3.1 Fine-tune Qwen
+##3. Fine-tune Qwen/LLaMA Summarizer
+###3.1 Fine-tune Qwen
 python 1_finetune_llm.py
 Mặc định dùng:
 Qwen/Qwen2.5-1.5B-Instruct
 Kết quả lưu tại:
 outputs/qwen_summarizer/final
-3.2 Fine-tune LLaMA
+###3.2 Fine-tune LLaMA
 Khi có quyền truy cập LLaMA, sửa trong 1_finetune_llm.py:
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 OUTPUT_DIR = "outputs/llama_summarizer"
 Sau đó chạy:
 python 1_finetune_llm.py
-4. Sinh draft summary S0
+##4. Sinh draft summary S0
 Test trước 50 mẫu:
 python 2_generate_drafts.py \
   --input data/test.jsonl \
@@ -86,7 +86,7 @@ python 2_generate_drafts.py \
   --input data/test.jsonl \
   --output data/test_drafts.jsonl \
   --limit -1
-5. Đánh giá baseline S0
+##5. Đánh giá baseline S0
 Mở file 4_eval_with_summac.py, sửa:
 FILE_PATH = "data/test_drafts_500.jsonl"
 PRED_KEY = "draft"
@@ -101,7 +101,7 @@ BERTScore Precision
 BERTScore Recall
 BERTScore F1
 SUMMAC-ZS
-6. Phương pháp 1: Residual DLM Refinement
+##6. Phương pháp 1: Residual DLM Refinement
 Ý tưởng
 Article
    ↓
@@ -114,20 +114,20 @@ DLM dự đoán Δz
 z_refined = z_draft + Δz
    ↓
 Qwen/LLaMA sinh summary S1
-6.1 Train DLM cho PP1
+###6.1 Train DLM cho PP1
 Trong 4_train_dlm.py, dùng:
 train_ds = DraftDataset("data/train_drafts_5000.jsonl", max_samples=5000)
 Chạy:
 python 4_train_dlm.py
 Model lưu tại:
 outputs/residual_dlm.pt
-6.2 Sinh summary S1
+###6.2 Sinh summary S1
 Trong 5_infer_s1.py, sửa input/output:
 input_file = "data/test_drafts_500.jsonl"
 output_file = "data/test_s1_500.jsonl"
 Chạy:
 python 5_infer_s1.py
-6.3 Đánh giá S1
+###6.3 Đánh giá S1
 Trong 4_eval_with_summac.py, sửa:
 FILE_PATH = "data/test_s1_500.jsonl"
 PRED_KEY = "s1"
@@ -136,7 +136,7 @@ python 4_eval_with_summac.py
 So sánh:
 S0 = Qwen/LLaMA draft
 S1 = Qwen/LLaMA + DLM refinement
-7. Phương pháp 2: DiffuSeq + Qwen/LLaMA Polish
+##7. Phương pháp 2: DiffuSeq + Qwen/LLaMA Polish
 Ý tưởng
 Train:
 x = article
@@ -151,7 +151,7 @@ DiffuSeq sinh diffusion summary draft
 Qwen/LLaMA polish
    ↓
 Final summary
-7.1 Chuẩn bị dữ liệu cho DiffuSeq
+###7.1 Chuẩn bị dữ liệu cho DiffuSeq
 python 8_prepare_diffuseq_cnn.py \
   --input_dir data \
   --output_dir DiffuSeq/datasets/CNNDM \
@@ -167,7 +167,7 @@ Format:
   "src": "article",
   "trg": "reference summary"
 }
-7.2 Train DiffuSeq
+###7.2 Train DiffuSeq
 Chạy:
 cd DiffuSeq/scripts
 bash 9_train_diffuseq_pp2.sh
@@ -179,7 +179,7 @@ Nếu OOM, giảm trong 9_train_diffuseq_pp2.sh:
 --hidden_dim 128
 Model DiffuSeq lưu trong:
 DiffuSeq/diffusion_models/
-7.3 Decode bằng DiffuSeq
+###7.3 Decode bằng DiffuSeq
 Xem tên folder model:
 ls DiffuSeq/diffusion_models
 Sửa trong 10_decode_diffuseq_pp2.sh:
@@ -191,7 +191,7 @@ cd ../..
 Sau đó lấy output generated summary của DiffuSeq và lưu thành:
 data/diffuseq_test_generations.txt
 Mỗi dòng là một summary do DiffuSeq sinh ra.
-7.4 Qwen/LLaMA polish output DiffuSeq
+###7.4 Qwen/LLaMA polish output DiffuSeq
 python 11_polish_diffuseq_qwen.py \
   --test_file data/test.jsonl \
   --diffuseq_file data/diffuseq_test_generations.txt \
@@ -204,7 +204,7 @@ Output:
   "diffuseq_summary": "...",
   "pp2_diffuseq_qwen": "..."
 }
-7.5 Đánh giá PP2
+###7.5 Đánh giá PP2
 Trong 4_eval_with_summac.py, sửa:
 FILE_PATH = "data/test_pp2_diffuseq_qwen.jsonl"
 PRED_KEY = "pp2_diffuseq_qwen"
@@ -212,13 +212,13 @@ Chạy:
 python 4_eval_with_summac.py
 Nếu muốn đánh giá DiffuSeq thô:
 PRED_KEY = "diffuseq_summary"
-8. Bảng kết quả cần báo cáo
+##8. Bảng kết quả cần báo cáo
 Method	ROUGE-1	ROUGE-2	ROUGE-L	BERTScore F1	SUMMAC-ZS
 S0: Qwen/LLaMA Draft					
 PP1: Residual DLM Refinement					
 PP2: DiffuSeq					
 PP2: DiffuSeq + Qwen/LLaMA Polish					
-9. Ghi chú quan trọng
+##9. Ghi chú quan trọng
 Baseline hiện tại
 Baseline S0 trên 500 mẫu:
 {
@@ -243,7 +243,7 @@ Nhận xét:
 PP1 tăng ROUGE và BERTScore,
 nhưng SUMMAC giảm.
 Điều này cho thấy DLM refinement giúp summary gần reference hơn nhưng có thể làm giảm factual consistency với article.
-10. Thứ tự chạy khuyến nghị
+##10. Thứ tự chạy khuyến nghị
 Chạy baseline
 python 0_prepare_data.py
 python 1_finetune_llm.py
