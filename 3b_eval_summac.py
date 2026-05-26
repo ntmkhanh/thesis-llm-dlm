@@ -11,11 +11,11 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 # CONFIG
 # =========================
 
-FILE_PATH = "data/test_pp2_true_diffusion.jsonl"
-PRED_KEY = "pp2_summary"
+FILE_PATH = "data/test_drafts_500.jsonl"
+PRED_KEY = "draft"
 
 # Với PP1:
-# FILE_PATH = "data/test_s1.jsonl"
+# FILE_PATH = "data/test_s1_100.jsonl"
 # PRED_KEY = "s1"
 
 # Với baseline:

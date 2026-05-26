@@ -1,24 +1,29 @@
-import json, torch
+import json
+import argparse
+import torch
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
-BASE_MODEL = "meta-llama/Llama-3.2-3B-Instruct"
-ADAPTER = "outputs/llama_summarizer/qwen_summarizer/final"
 
-tokenizer = AutoTokenizer.from_pretrained(ADAPTER)
-tokenizer.pad_token = tokenizer.eos_token
+def parse_args():
+    parser = argparse.ArgumentParser()
 
-base = AutoModelForCausalLM.from_pretrained(
-    BASE_MODEL,
-    torch_dtype=torch.float16,
-    device_map="auto"
-)
+    parser.add_argument("--base_model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct")
+    parser.add_argument("--adapter", type=str, default="outputs/qwen_summarizer/final")
 
-model = PeftModel.from_pretrained(base, ADAPTER)
-model.eval()
+    parser.add_argument("--input", type=str, default="data/test.jsonl")
+    parser.add_argument("--output", type=str, default="data/test_drafts_sample.jsonl")
 
-def prompt(article):
+    parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--max_input_tokens", type=int, default=900)
+    parser.add_argument("--max_new_tokens", type=int, default=128)
+    parser.add_argument("--num_beams", type=int, default=4)
+
+    return parser.parse_args()
+
+
+def make_prompt(article):
     return f"""### Article:
 {article}
 
@@ -28,34 +33,85 @@ Summarize the article concisely and factually.
 ### Summary:
 """
 
+
+def clean_output(text):
+    if "### Summary:" in text:
+        text = text.split("### Summary:")[-1]
+    return text.strip()
+
+
 @torch.no_grad()
-def generate(article):
+def generate_one(model, tokenizer, article, args):
+    prompt = make_prompt(article)
+
     inputs = tokenizer(
-        prompt(article),
+        prompt,
         return_tensors="pt",
         truncation=True,
-        max_length=900
+        max_length=args.max_input_tokens
     ).to(model.device)
 
-    output = model.generate(
+    output_ids = model.generate(
         **inputs,
-        max_new_tokens=128,
-        num_beams=4,
+        max_new_tokens=args.max_new_tokens,
+        num_beams=args.num_beams,
         do_sample=False,
-        pad_token_id=tokenizer.eos_token_id
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id
     )
 
-    text = tokenizer.decode(output[0], skip_special_tokens=True)
-    return text.split("### Summary:")[-1].strip()
+    text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+    return clean_output(text)
 
-def run(in_path, out_path):
-    with open(in_path, encoding="utf-8") as f, open(out_path, "w", encoding="utf-8") as out:
-        for line in tqdm(f):
+
+def main():
+    args = parse_args()
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.adapter,
+        trust_remote_code=True
+    )
+
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    base = AutoModelForCausalLM.from_pretrained(
+        args.base_model,
+        torch_dtype=torch.float16,
+        device_map="auto",
+        trust_remote_code=True
+    )
+
+    model = PeftModel.from_pretrained(base, args.adapter)
+    model.eval()
+
+    n = 0
+
+    with open(args.input, encoding="utf-8") as f, \
+         open(args.output, "w", encoding="utf-8") as out:
+
+        for line in tqdm(f, desc="Generating drafts"):
+            if args.limit is not None and n >= args.limit:
+                break
+
             ex = json.loads(line)
-            draft = generate(ex["article"])
-            ex["draft"] = draft
-            out.write(json.dumps(ex, ensure_ascii=False) + "\n")
 
-run("data/train.jsonl", "data/train_drafts.jsonl")
-run("data/valid.jsonl", "data/valid_drafts.jsonl")
-run("data/test.jsonl", "data/test_drafts.jsonl")
+            draft = generate_one(
+                model,
+                tokenizer,
+                ex["article"],
+                args
+            )
+
+            ex["draft"] = draft
+
+            out.write(json.dumps(ex, ensure_ascii=False) + "\n")
+            out.flush()
+
+            n += 1
+
+    print(f"Saved {n} drafts to {args.output}")
+
+
+if __name__ == "__main__":
+    main()

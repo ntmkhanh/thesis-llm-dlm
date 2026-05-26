@@ -5,7 +5,8 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+# MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
+MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
 DEVICE = "cuda"
 
 class DraftDataset(Dataset):
@@ -85,12 +86,12 @@ dlm = ResidualDLM(hidden).to(DEVICE)
 
 optimizer = torch.optim.AdamW(dlm.parameters(), lr=1e-4)
 
-train_ds = DraftDataset("data/train_drafts.jsonl", max_samples=20000)
+train_ds = DraftDataset("data/train_drafts_5000.jsonl", max_samples=20000)
 loader = DataLoader(train_ds, batch_size=4, shuffle=True, collate_fn=collate)
 
-for epoch in range(5):
+for epoch in range(100):
     dlm.train()
-    total = 0
+    total = 1
 
     for batch in tqdm(loader):
         with torch.no_grad():
@@ -116,7 +117,7 @@ for epoch in range(5):
 
     print(f"epoch={epoch} loss={total/len(loader):.4f}")
 
-torch.save(dlm.state_dict(), "outputs/residual_dlm.pt")
+torch.save(dlm.state_dict(), "outputs/residual_dlm_100.pt")
 
 # train Residual DLM 
 # z_refined = z_draft + Δz

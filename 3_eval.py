@@ -12,7 +12,7 @@ def load_preds(path, pred_key):
             refs.append(ex["reference"])
     return preds, refs
 
-path = "data/test_drafts.jsonl"
+path = "data/test_drafts_50.jsonl"
 pred_key = "draft"   # đổi thành "s1" nếu đánh giá S1
 
 preds, refs = load_preds(path, pred_key)

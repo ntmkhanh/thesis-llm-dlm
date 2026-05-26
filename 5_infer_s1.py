@@ -4,8 +4,9 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
-BASE_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
-ADAPTER = "outputs/llama_summarizer/final"
+# BASE_MODEL = "meta-llama/Llama-3.2-3B-Instruct"
+BASE_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+ADAPTER = "outputs/qwen_summarizer/final"
 DEVICE = "cuda"
 
 class ResidualDLM(nn.Module):
@@ -74,7 +75,7 @@ llama.eval()
 hidden = llama.config.hidden_size
 
 dlm = ResidualDLM(hidden).to(DEVICE)
-dlm.load_state_dict(torch.load("outputs/residual_dlm.pt"))
+dlm.load_state_dict(torch.load("outputs/residual_dlm_100.pt"))
 dlm.eval()
 
 projector = LatentProjector(hidden, prefix_len=8).to(DEVICE)
@@ -133,8 +134,8 @@ def generate_s1(article, draft):
     text = tokenizer.decode(outputs[0], skip_special_tokens=True)
     return text.split("### Final Summary:")[-1].strip()
 
-with open("data/test_drafts.jsonl", encoding="utf-8") as f, \
-     open("data/test_s1.jsonl", "w", encoding="utf-8") as out:
+with open("data/test_drafts_500.jsonl", encoding="utf-8") as f, \
+     open("data/test_s1_100.jsonl", "w", encoding="utf-8") as out:
 
     for line in tqdm(f):
         ex = json.loads(line)
