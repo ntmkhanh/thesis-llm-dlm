@@ -20,7 +20,7 @@ Mục tiêu của PP1B là khai thác nhiều giả thuyết tóm tắt khác nh
 
 ---
 
-## 2. Motivate
+## 2. Motivation
 
 Một draft duy nhất có thể mắc lỗi:
 
@@ -507,7 +507,7 @@ Mỗi dòng có thêm:
 |---|---|
 | `2b_generate_multi_drafts.py` | Sinh nhiều draft summary |
 | `5b_select_best_draft.py` | Chọn draft tốt nhất bằng SUMMAC |
-| `5c_infer_multi_latent_fusion_select.py` | Chạy latent fusion + DLM refine |
+| `5c_infer_multi_latent_fusion.py` | Chạy latent fusion + DLM refine |
 | `4_eval_with_summac.py` | Đánh giá ROUGE, BERTScore, SUMMAC |
 
 ---
@@ -571,7 +571,7 @@ python 5b_select_best_draft.py \
 ## Bước 4 — Chạy Mean Fusion
 
 ```bash
-python 5c_infer_multi_latent_fusion_select.py \
+python 5c_infer_multi_latent_fusion.py \
   --input data/test_multi_drafts_500.jsonl \
   --output data/test_multi_fusion_mean_500.jsonl \
   --fusion_key mean
@@ -589,7 +589,7 @@ PRED_KEY = "multi_fusion_mean"
 ## Bước 5 — Chạy Max Fusion
 
 ```bash
-python 5c_infer_multi_latent_fusion_select.py \
+python 5c_infer_multi_latent_fusion.py \
   --input data/test_multi_drafts_500.jsonl \
   --output data/test_multi_fusion_max_500.jsonl \
   --fusion_key max
@@ -607,7 +607,7 @@ PRED_KEY = "multi_fusion_max"
 ## Bước 6 — Chạy SUMMAC Weighted Fusion
 
 ```bash
-python 5c_infer_multi_latent_fusion_select.py \
+python 5c_infer_multi_latent_fusion.py \
   --input data/test_multi_drafts_500_scored.jsonl \
   --output data/test_multi_fusion_summac_weighted_500.jsonl \
   --fusion_key summac_weighted
@@ -627,7 +627,7 @@ PRED_KEY = "multi_fusion_summac_weighted"
 Chỉ nên chạy khi đã có hoặc muốn thử module attention.
 
 ```bash
-python 5c_infer_multi_latent_fusion_select.py \
+python 5c_infer_multi_latent_fusion.py \
   --input data/test_multi_drafts_500.jsonl \
   --output data/test_multi_fusion_attention_500.jsonl \
   --fusion_key attention
