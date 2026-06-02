@@ -15,21 +15,21 @@ from peft import LoraConfig, get_peft_model
 # =========================
 
 # MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
-MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
+MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
 
 TRAIN_FILE = "data/train.jsonl"
 VALID_FILE = "data/valid.jsonl"
 
 # OUTPUT_DIR = "outputs/qwen_summarizer"
 
-OUTPUT_DIR = "outputs/llama_summarizer"
+OUTPUT_DIR = "outputs/llama_summarizer_8b"
 
 MAX_LENGTH = 1024
 MAX_PROMPT_LENGTH = 768
 MAX_ANSWER_LENGTH = 256
 
-TRAIN_SAMPLES = 20000
-VALID_SAMPLES = 2000
+TRAIN_SAMPLES = None
+VALID_SAMPLES = None
 
 
 # =========================

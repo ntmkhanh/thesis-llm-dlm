@@ -100,8 +100,8 @@ def preprocess(ex):
     return tokenized
 
 
-train_ds = load_jsonl("data/train.jsonl", max_samples=20000)
-valid_ds = load_jsonl("data/valid.jsonl", max_samples=2000)
+train_ds = load_jsonl("data/train.jsonl", max_samples=None)
+valid_ds = load_jsonl("data/valid.jsonl", max_samples=None)
 
 train_ds = train_ds.map(preprocess, remove_columns=train_ds.column_names)
 valid_ds = valid_ds.map(preprocess, remove_columns=valid_ds.column_names)
