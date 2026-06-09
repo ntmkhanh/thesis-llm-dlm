@@ -210,10 +210,11 @@ check_token_stats(valid_ds, "valid")
 
 args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    per_device_train_batch_size=1,
-    per_device_eval_batch_size=1,
-    gradient_accumulation_steps=16,
-    learning_rate=1e-4,
+    per_device_train_batch_size=2,
+    per_device_eval_batch_size=2,
+    gradient_accumulation_steps=8,
+    learning_rate=2e-5,
+    # learning_rate=1e-4,
     num_train_epochs=10,
 
     fp16=True,
@@ -230,7 +231,8 @@ args = TrainingArguments(
 
     report_to="none",
     remove_unused_columns=False,
-    max_grad_norm=1.0,
+    # max_grad_norm=1.0,
+    max_grad_norm=0,5,
 )
 
 
