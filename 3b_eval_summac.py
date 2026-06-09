@@ -11,8 +11,8 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 # CONFIG
 # =========================
 
-FILE_PATH = "data/test_drafts_500.jsonl"
-PRED_KEY = "draft"
+FILE_PATH = "data/test_pp2_true_diffusion.jsonl"
+PRED_KEY = "pp2_summary"
 
 # Với PP1:
 # FILE_PATH = "data/test_s1_100.jsonl"

@@ -3,12 +3,7 @@ import argparse
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-from transformers import (
-    AutoTokenizer,
-    AutoModelForCausalLM,
-    BartTokenizer,
-    BartModel
-)
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
 
@@ -22,7 +17,6 @@ def parse_args():
     p.add_argument("--output", default="data/test_multi_fusion_500.jsonl")
 
     p.add_argument("--dlm_path", default="outputs/residual_dlm.pt")
-    p.add_argument("--bart", default="facebook/bart-base")
 
     p.add_argument(
         "--fusion_key",
@@ -49,8 +43,9 @@ def parse_args():
 
 
 class ResidualDLM(nn.Module):
-    def __init__(self, hidden_size=768):
+    def __init__(self, hidden_size):
         super().__init__()
+
         self.net = nn.Sequential(
             nn.Linear(hidden_size * 2, hidden_size * 2),
             nn.GELU(),
@@ -65,8 +60,9 @@ class ResidualDLM(nn.Module):
 
 
 class LatentProjector(nn.Module):
-    def __init__(self, in_dim=768, llm_dim=1536, prefix_len=8):
+    def __init__(self, in_dim, llm_dim, prefix_len=8):
         super().__init__()
+
         self.prefix_len = prefix_len
         self.llm_dim = llm_dim
 
@@ -82,18 +78,7 @@ class LatentProjector(nn.Module):
 
 
 class AttentionFusion(nn.Module):
-    """
-    Learned attention fusion.
-
-    Input:
-        z_drafts: [K, H]
-
-    Output:
-        z_fused: [1, H]
-        weights: [K]
-    """
-
-    def __init__(self, hidden_size=768):
+    def __init__(self, hidden_size):
         super().__init__()
 
         self.score = nn.Sequential(
@@ -111,8 +96,8 @@ class AttentionFusion(nn.Module):
 
 
 @torch.no_grad()
-def encode_bart(bart, bart_tok, texts, max_length, device):
-    inputs = bart_tok(
+def encode_llm(llm, tokenizer, texts, max_length, device):
+    inputs = tokenizer(
         texts,
         return_tensors="pt",
         padding=True,
@@ -120,26 +105,21 @@ def encode_bart(bart, bart_tok, texts, max_length, device):
         max_length=max_length
     ).to(device)
 
-    outputs = bart.encoder(
-        input_ids=inputs.input_ids,
-        attention_mask=inputs.attention_mask
+    outputs = llm(
+        **inputs,
+        output_hidden_states=True,
+        use_cache=False
     )
 
-    h = outputs.last_hidden_state
+    h = outputs.hidden_states[-1]  # [B, T, H]
     mask = inputs.attention_mask.unsqueeze(-1)
+
     z = (h * mask).sum(dim=1) / mask.sum(dim=1)
 
     return z.float()
 
 
 def fuse_latents(z_drafts, ex, fusion_key, attention_fusion=None):
-    """
-    z_drafts: [K, H]
-    return:
-        z_fused: [1, H]
-        info: dict
-    """
-
     info = {}
 
     if fusion_key == "mean":
@@ -173,7 +153,7 @@ def fuse_latents(z_drafts, ex, fusion_key, attention_fusion=None):
         if scores is None:
             raise ValueError(
                 "fusion_key=summac_weighted cần input có key draft_scores. "
-                "Hãy chạy 5b_select_best_draft.py trước để tạo draft_scores."
+                "Hãy chạy 5b_select_best_draft.py trước."
             )
 
         scores = torch.tensor(
@@ -198,7 +178,6 @@ def fuse_latents(z_drafts, ex, fusion_key, attention_fusion=None):
             raise ValueError("fusion_key=attention nhưng attention_fusion=None")
 
         z_fused, weights = attention_fusion(z_drafts)
-
         info["fusion_weights"] = weights.detach().cpu().tolist()
         return z_fused, info
 
@@ -234,9 +213,7 @@ def generate_one(
     ex,
     args,
     llm,
-    llm_tok,
-    bart,
-    bart_tok,
+    tokenizer,
     dlm,
     projector,
     attention_fusion,
@@ -245,10 +222,10 @@ def generate_one(
     article = ex["article"]
     drafts = ex["drafts"]
 
-    z_drafts = encode_bart(
-        bart,
-        bart_tok,
-        drafts,
+    z_drafts = encode_llm(
+        llm=llm,
+        tokenizer=tokenizer,
+        texts=drafts,
         max_length=256,
         device=device
     )
@@ -260,10 +237,10 @@ def generate_one(
         attention_fusion=attention_fusion
     )
 
-    z_article = encode_bart(
-        bart,
-        bart_tok,
-        [article],
+    z_article = encode_llm(
+        llm=llm,
+        tokenizer=tokenizer,
+        texts=[article],
         max_length=512,
         device=device
     )
@@ -273,7 +250,7 @@ def generate_one(
 
     latent_prefix = projector(z_refined)
 
-    inputs = llm_tok(
+    inputs = tokenizer(
         make_prompt(article, drafts),
         return_tensors="pt",
         truncation=True,
@@ -305,10 +282,10 @@ def generate_one(
         max_new_tokens=args.max_new_tokens,
         num_beams=args.num_beams,
         do_sample=False,
-        pad_token_id=llm_tok.eos_token_id
+        pad_token_id=tokenizer.eos_token_id
     )
 
-    text = llm_tok.decode(outputs[0], skip_special_tokens=True)
+    text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
     return clean(text), fusion_info
 
@@ -322,17 +299,13 @@ def main():
     if output_key is None:
         output_key = f"multi_fusion_{args.fusion_key}"
 
-    bart_tok = BartTokenizer.from_pretrained(args.bart)
-    bart = BartModel.from_pretrained(args.bart).to(device)
-    bart.eval()
-
-    llm_tok = AutoTokenizer.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         args.adapter,
         trust_remote_code=True
     )
 
-    if llm_tok.pad_token is None:
-        llm_tok.pad_token = llm_tok.eos_token
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     base = AutoModelForCausalLM.from_pretrained(
         args.base_model,
@@ -345,13 +318,27 @@ def main():
     llm.eval()
 
     llm_dim = llm.config.hidden_size
+    print("LLM hidden size:", llm_dim)
 
-    dlm = ResidualDLM(hidden_size=768).to(device)
-    dlm.load_state_dict(torch.load(args.dlm_path, map_location=device))
+    dlm = ResidualDLM(hidden_size=llm_dim).to(device)
+
+    try:
+        state = torch.load(
+            args.dlm_path,
+            map_location=device,
+            weights_only=True
+        )
+    except TypeError:
+        state = torch.load(
+            args.dlm_path,
+            map_location=device
+        )
+
+    dlm.load_state_dict(state)
     dlm.eval()
 
     projector = LatentProjector(
-        in_dim=768,
+        in_dim=llm_dim,
         llm_dim=llm_dim,
         prefix_len=args.prefix_len
     ).to(device)
@@ -360,13 +347,15 @@ def main():
     attention_fusion = None
 
     if args.fusion_key == "attention":
-        attention_fusion = AttentionFusion(hidden_size=768).to(device)
+        attention_fusion = AttentionFusion(
+            hidden_size=llm_dim
+        ).to(device)
+
         attention_fusion.eval()
 
         print(
-            "WARNING: AttentionFusion hiện tại chưa được train, "
-            "chỉ dùng để thử nghiệm inference. "
-            "Muốn có kết quả có ý nghĩa cần train AttentionFusion riêng."
+            "WARNING: AttentionFusion chưa được train. "
+            "Kết quả attention chỉ dùng để test kỹ thuật."
         )
 
     with open(args.input, encoding="utf-8") as f, \
@@ -379,9 +368,7 @@ def main():
                 ex=ex,
                 args=args,
                 llm=llm,
-                llm_tok=llm_tok,
-                bart=bart,
-                bart_tok=bart_tok,
+                tokenizer=tokenizer,
                 dlm=dlm,
                 projector=projector,
                 attention_fusion=attention_fusion,

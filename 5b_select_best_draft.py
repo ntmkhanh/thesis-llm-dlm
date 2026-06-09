@@ -64,7 +64,12 @@ def main():
             ex = json.loads(line)
 
             scored = []
-            for d in ex["drafts"]:
+            for d in tqdm(
+                ex["drafts"],
+                leave=False,
+                desc="Scoring drafts"
+            ):
+
                 scored.append((scorer.score(ex["article"], d), d))
 
             scored.sort(reverse=True, key=lambda x: x[0])
