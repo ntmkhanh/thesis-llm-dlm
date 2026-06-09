@@ -24,12 +24,12 @@ VALID_FILE = "data/valid.jsonl"
 
 OUTPUT_DIR = "outputs/llama_summarizer"
 
-MAX_LENGTH = 768
-MAX_PROMPT_LENGTH = 768
-MAX_ANSWER_LENGTH = 256
+MAX_LENGTH = 1024
+MAX_ANSWER_LENGTH = 160
+MAX_PROMPT_LENGTH = MAX_LENGTH - MAX_ANSWER_LENGTH
 
-TRAIN_SAMPLES = None
-VALID_SAMPLES = None
+TRAIN_SAMPLES = 50000
+VALID_SAMPLES = 5000
 
 
 # =========================
@@ -184,6 +184,26 @@ check_bad_labels(train_ds, "train")
 check_bad_labels(valid_ds, "valid")
 
 
+def check_token_stats(ds, name):
+    total_lens = []
+    label_lens = []
+
+    for ex in ds:
+        total_lens.append(sum(ex["attention_mask"]))
+        label_lens.append(sum(1 for x in ex["labels"] if x != -100))
+
+    print(f"\n{name}")
+    print("avg total tokens :", sum(total_lens) / len(total_lens))
+    print("max total tokens :", max(total_lens))
+    print("avg label tokens :", sum(label_lens) / len(label_lens))
+    print("min label tokens :", min(label_lens))
+    print("max label tokens :", max(label_lens))
+
+
+check_token_stats(train_ds, "train")
+check_token_stats(valid_ds, "valid")
+
+
 # =========================
 # TRAINING ARGS
 # =========================
@@ -194,7 +214,7 @@ args = TrainingArguments(
     per_device_eval_batch_size=1,
     gradient_accumulation_steps=16,
     learning_rate=1e-4,
-    num_train_epochs=90,
+    num_train_epochs=10,
 
     fp16=True,
     # Nếu vẫn nan thì đổi:
