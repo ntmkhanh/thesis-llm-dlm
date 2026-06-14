@@ -142,6 +142,20 @@ class SummaCZS:
 articles, preds, refs = load_jsonl(FILE_PATH, PRED_KEY)
 
 print("n_samples:", len(preds))
+print("\n===== DEBUG FIRST 5 SAMPLES =====\n")
+
+for i in range(min(5, len(preds))):
+    print(f"Sample {i}")
+
+    print("PRED:")
+    print(preds[i])
+
+    print("\nREF:")
+    print(refs[i])
+
+    print("\nMATCH:", preds[i].strip() == refs[i].strip())
+
+    print("\n" + "=" * 100 + "\n")
 
 # ROUGE
 rouge = evaluate.load("rouge")

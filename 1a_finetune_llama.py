@@ -232,7 +232,7 @@ args = TrainingArguments(
     report_to="none",
     remove_unused_columns=False,
     # max_grad_norm=1.0,
-    max_grad_norm=0,5,
+    max_grad_norm=0.5,
 )
 
 

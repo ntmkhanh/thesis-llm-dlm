@@ -4,7 +4,7 @@ import json
 import math
 import argparse
 import random
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 
 import torch
 import torch.nn as nn
@@ -17,31 +17,35 @@ from peft import PeftModel
 
 
 """
-PP2: DLM latent planner + LLM decoder
--------------------------------------
-Core idea:
-    Article -> Diffusion model -> latent semantic plan z_plan -> LLM -> summary
+PP2: DLM Latent Planning + Latent Projector + LLM Decoder
+---------------------------------------------------------
 
-Important design choice:
-    DLM does NOT generate text.
-    DLM learns to generate a latent plan represented by the token-embedding sequence
-    of the reference summary. The LLM then realizes this latent plan into text.
+Flow:
+    Article
+      ↓
+    DLM
+      ↓
+    Latent Plan z
+      ↓
+    Latent Projector
+      ↓
+    LLM Decoder
+      ↓
+    Summary
 
 Modes:
     1) train_dlm
-       Train diffusion denoiser to recover z_plan from noise conditioned on article.
+       Train DLM to denoise latent summary plan conditioned on article.
 
-    2) train_bridge
-       Freeze DLM. Train a small bridge projector so LLM can consume DLM-style latent
-       plans as a soft prefix. To reduce train/infer mismatch, the bridge is trained
-       on DLM-predicted x0, not only on clean gold embeddings.
+    2) train_projector
+       Freeze DLM + LLM. Train Latent Projector so LLM can consume latent plan
+       as soft prefix.
 
-    3) infer
-       Sample z_plan from pure noise using DLM, project by bridge, decode summary by LLM.
+    3) oracle_infer
+       Use gold latent plan from reference. This checks projector + LLM upper bound.
 
-    4) oracle_infer
-       Use gold reference latent as soft prefix. This is an upper bound to show whether
-       latent plans are useful when the latent plan is good.
+    4) infer
+       Article -> DLM sampled latent plan -> projector -> LLM summary.
 """
 
 
@@ -51,18 +55,18 @@ LLM_ADAPTER = "outputs/qwen_summarizer/final"
 TRAIN_FILE = "data/train.jsonl"
 TEST_FILE = "data/test.jsonl"
 
-OUT_DIR = "outputs/pp2_latent_plan_fixed"
+OUT_DIR = "outputs/pp2_latent_plan_projector"
 
 MAX_ARTICLE_LEN = 512
 MAX_PLAN_LEN = 96
-LLM_MAX_LEN = 1024
+LLM_MAX_LEN = 1536
 
 BATCH_SIZE = 1
 GRAD_ACCUM = 8
 EPOCHS = 10
 
 LR_DLM = 1e-5
-LR_BRIDGE = 5e-5
+LR_PROJECTOR = 1e-6
 
 T = 2000
 SAMPLE_STEPS = 500
@@ -91,14 +95,11 @@ def clean_summary(text: str, max_sentences: int = 3, max_words: int = 90) -> str
     text = re.sub(r"<\|.*?\|>", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
 
-    # If prompt leaked into output, keep the part after Summary.
     if "### Summary:" in text:
         text = text.split("### Summary:")[-1].strip()
 
     text = re.sub(r"^###\s*Summary\s*: ?", "", text, flags=re.I).strip()
     text = re.sub(r"^Summary\s*: ?", "", text, flags=re.I).strip()
-
-    # Remove accidental bullet prefixes because final summary should be prose.
     text = re.sub(r"^[-*]\s+", "", text).strip()
 
     sents = re.split(r"(?<=[.!?])\s+", text)
@@ -202,6 +203,7 @@ class GaussianDiffusion:
     def p_sample(self, denoiser, x_t, t: int, article_embeds, article_mask):
         bsz = x_t.size(0)
         t_batch = torch.full((bsz,), t, device=x_t.device, dtype=torch.long)
+
         eps_pred = denoiser(
             x_t=x_t,
             t=t_batch,
@@ -320,9 +322,10 @@ class DiffusionLatentPlanner(nn.Module):
         return eps_pred
 
 
-class BridgeProjector(nn.Module):
-    def __init__(self, hidden_dim: int):
+class LatentProjector(nn.Module):
+    def __init__(self, hidden_dim: int, scale: float = 0.1):
         super().__init__()
+        self.scale = scale
         self.net = nn.Sequential(
             nn.LayerNorm(hidden_dim),
             nn.Linear(hidden_dim, hidden_dim),
@@ -330,8 +333,12 @@ class BridgeProjector(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
         )
 
+        # Identity init: projector starts close to identity.
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
     def forward(self, x):
-        return x + self.net(x)
+        return x + self.scale * self.net(x)
 
 
 class PP2LatentPlanSystem:
@@ -342,7 +349,6 @@ class PP2LatentPlanSystem:
 
         print("Device:", self.device)
 
-        # Adapter dirs sometimes do not contain tokenizer files; fallback to base LLM.
         try:
             self.tok = AutoTokenizer.from_pretrained(args.llm_adapter, trust_remote_code=True)
         except Exception:
@@ -351,14 +357,24 @@ class PP2LatentPlanSystem:
         if self.tok.pad_token is None:
             self.tok.pad_token = self.tok.eos_token
 
+        dtype = torch.float16 if self.device == "cuda" else torch.float32
+        if args.llm_dtype == "bf16":
+            dtype = torch.bfloat16
+        elif args.llm_dtype == "fp32":
+            dtype = torch.float32
+        elif args.llm_dtype == "fp16":
+            dtype = torch.float16 if self.device == "cuda" else torch.float32
+
         base_llm = AutoModelForCausalLM.from_pretrained(
             args.base_llm,
-            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+            torch_dtype=dtype,
             trust_remote_code=True,
         ).to(self.device)
 
         self.llm = PeftModel.from_pretrained(base_llm, args.llm_adapter).to(self.device)
         self.llm.eval()
+        self.llm.config.use_cache = False
+
         for p in self.llm.parameters():
             p.requires_grad = False
 
@@ -366,13 +382,18 @@ class PP2LatentPlanSystem:
         self.embed = self.llm.get_input_embeddings()
 
         self.diffusion = GaussianDiffusion(timesteps=args.t, device=self.device)
+
         self.dlm = DiffusionLatentPlanner(
             hidden_dim=self.hidden_dim,
             n_layers=args.dlm_layers,
             n_heads=args.dlm_heads,
             dropout=args.dropout,
         ).to(self.device)
-        self.bridge = BridgeProjector(self.hidden_dim).to(self.device)
+
+        self.projector = LatentProjector(
+            hidden_dim=self.hidden_dim,
+            scale=args.projector_scale,
+        ).to(self.device)
 
     def make_prompt(self, article: str):
         return f"""### Article:
@@ -412,11 +433,6 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
 
     @torch.no_grad()
     def get_gold_plan_embeds(self, references: List[str]):
-        """
-        The latent plan is represented by reference-summary token embeddings.
-        It is called a plan because it is NOT decoded directly by DLM; it acts as
-        a semantic soft prefix guiding the LLM decoder.
-        """
         input_ids, attention_mask = self.tokenize_reference(references)
         embeds = self.embed(input_ids).float()
         embeds = embeds * attention_mask.unsqueeze(-1).float()
@@ -432,7 +448,7 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
         ensure_dir(os.path.dirname(path))
         torch.save({
             "dlm": self.dlm.state_dict(),
-            "bridge": self.bridge.state_dict(),
+            "projector": self.projector.state_dict(),
             "hidden_dim": self.hidden_dim,
             "T": self.args.t,
             "max_plan_len": self.args.max_plan_len,
@@ -440,20 +456,31 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
         }, path)
         print("Saved:", path)
 
-    def load_ckpt(self, path: str, load_dlm=True, load_bridge=True):
+    def load_ckpt(self, path: str, load_dlm=True, load_projector=True):
         ckpt = torch.load(path, map_location=self.device)
+
         if load_dlm and "dlm" in ckpt:
             self.dlm.load_state_dict(ckpt["dlm"])
-        if load_bridge and "bridge" in ckpt:
-            self.bridge.load_state_dict(ckpt["bridge"])
+
+        if load_projector:
+            if "projector" in ckpt:
+                self.projector.load_state_dict(ckpt["projector"])
+            elif "bridge" in ckpt:
+                self.projector.load_state_dict(ckpt["bridge"])
+
         print("Loaded:", path)
 
     def train_dlm(self):
         dataset = SummaryDataset(self.args.train_file, max_samples=self.args.max_train_samples)
-        loader = DataLoader(dataset, batch_size=self.args.batch_size, shuffle=True, collate_fn=collate_fn)
+        loader = DataLoader(
+            dataset,
+            batch_size=self.args.batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+        )
 
         self.dlm.train()
-        self.bridge.eval()
+        self.projector.eval()
 
         optimizer = torch.optim.AdamW(
             self.dlm.parameters(),
@@ -461,11 +488,13 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
             eps=1e-8,
             weight_decay=0.01,
         )
+
         optimizer.zero_grad()
         global_step = 0
 
         for epoch in range(self.args.epochs):
             total_loss = 0.0
+            good_steps = 0
             pbar = tqdm(loader, desc=f"train_dlm epoch {epoch + 1}")
 
             for batch in pbar:
@@ -485,7 +514,8 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
                 )
 
                 loss = self.masked_mse_loss(pred=eps_pred, target=noise, mask=z_mask)
-                if torch.isnan(loss) or torch.isinf(loss):
+
+                if not torch.isfinite(loss):
                     print("Skip NaN/Inf DLM batch")
                     optimizer.zero_grad()
                     continue
@@ -498,10 +528,11 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
                     optimizer.zero_grad()
 
                 total_loss += loss.item()
+                good_steps += 1
                 global_step += 1
                 pbar.set_postfix({"loss_diff": f"{loss.item():.4f}"})
 
-            avg_loss = total_loss / max(len(loader), 1)
+            avg_loss = total_loss / max(good_steps, 1)
             print(f"train_dlm epoch={epoch + 1} avg_loss={avg_loss:.4f}")
             self.save_ckpt(os.path.join(self.args.out_dir, f"dlm_epoch_{epoch + 1}.pt"))
 
@@ -510,30 +541,46 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
     def build_lm_inputs_with_soft_prefix(self, articles, references, soft_prefix_embeds):
         prompts = [self.make_prompt(a) for a in articles]
         answers = [r.strip() + self.tok.eos_token for r in references]
-        full_texts = [p + a for p, a in zip(prompts, answers)]
 
-        tok = self.tok(
-            full_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=self.args.llm_max_len,
-        ).to(self.device)
+        max_answer_len = self.args.max_answer_len
+        max_prompt_len = self.args.llm_max_len - max_answer_len
 
-        input_ids = tok.input_ids
-        attention_mask = tok.attention_mask
-        labels = input_ids.clone()
-        labels[attention_mask == 0] == -100
+        all_input_ids = []
+        all_attention_mask = []
+        all_labels = []
 
-        for i, prompt in enumerate(prompts):
-            p_ids = self.tok(
+        for prompt, answer in zip(prompts, answers):
+            p_tok = self.tok(
                 prompt,
                 truncation=True,
-                max_length=self.args.llm_max_len,
+                max_length=max_prompt_len,
                 padding=False,
-            )["input_ids"]
-            prompt_len = min(len(p_ids), labels.size(1))
-            labels[i, :prompt_len] = -100
+            )
+
+            a_tok = self.tok(
+                answer,
+                truncation=True,
+                max_length=max_answer_len,
+                padding=False,
+            )
+
+            input_ids = p_tok["input_ids"] + a_tok["input_ids"]
+            attention_mask = [1] * len(input_ids)
+            labels = [-100] * len(p_tok["input_ids"]) + a_tok["input_ids"]
+
+            pad_len = self.args.llm_max_len - len(input_ids)
+            if pad_len > 0:
+                input_ids += [self.tok.pad_token_id] * pad_len
+                attention_mask += [0] * pad_len
+                labels += [-100] * pad_len
+
+            all_input_ids.append(input_ids)
+            all_attention_mask.append(attention_mask)
+            all_labels.append(labels)
+
+        input_ids = torch.tensor(all_input_ids, dtype=torch.long, device=self.device)
+        attention_mask = torch.tensor(all_attention_mask, dtype=torch.long, device=self.device)
+        labels = torch.tensor(all_labels, dtype=torch.long, device=self.device)
 
         token_embeds = self.embed(input_ids)
         soft_prefix_embeds = soft_prefix_embeds.to(token_embeds.dtype)
@@ -558,17 +605,14 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
         return inputs_embeds, attention_mask, labels
 
     @torch.no_grad()
-    def get_dlm_predicted_z0_for_bridge(self, articles, references):
-        """
-        Bridge training should see latent prefixes similar to inference time.
-        Instead of training bridge only on clean gold z_plan, we freeze DLM and use
-        DLM-predicted x0 from a randomly noised gold latent plan.
-        """
+    def get_dlm_predicted_z0_for_projector(self, articles, references):
         article_embeds, article_mask = self.get_article_embeds(articles)
         z_plan, z_mask, _ = self.get_gold_plan_embeds(references)
 
         bsz = z_plan.size(0)
-        t = torch.randint(0, self.args.t, (bsz,), device=self.device, dtype=torch.long)
+        t_max = min(self.args.t, self.args.projector_t_max)
+        t = torch.randint(0, t_max, (bsz,), device=self.device, dtype=torch.long)
+
         x_t, _ = self.diffusion.q_sample(z_plan, t)
 
         eps_pred = self.dlm(
@@ -577,58 +621,93 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
             article_embeds=article_embeds,
             article_mask=article_mask,
         )
+
         z0_pred = self.diffusion.predict_x0_from_eps(x_t, t, eps_pred)
+
+        z0_pred = torch.nan_to_num(
+            z0_pred,
+            nan=0.0,
+            posinf=self.args.latent_clip,
+            neginf=-self.args.latent_clip,
+        )
         z0_pred = torch.clamp(z0_pred, -self.args.latent_clip, self.args.latent_clip)
 
-        # Keep padding positions near zero.
         z0_pred = z0_pred * z_mask.unsqueeze(-1).float()
         return z0_pred, z_mask
 
-    def train_bridge(self):
+    def train_projector(self):
         if not self.args.ckpt:
-            raise ValueError("--ckpt pointing to dlm_final.pt is required for train_bridge")
+            raise ValueError("--ckpt pointing to dlm_final.pt is required for train_projector")
 
-        self.load_ckpt(self.args.ckpt, load_dlm=True, load_bridge=False)
+        self.load_ckpt(self.args.ckpt, load_dlm=True, load_projector=False)
 
         dataset = SummaryDataset(self.args.train_file, max_samples=self.args.max_train_samples)
-        loader = DataLoader(dataset, batch_size=self.args.batch_size, shuffle=True, collate_fn=collate_fn)
+        loader = DataLoader(
+            dataset,
+            batch_size=self.args.batch_size,
+            shuffle=True,
+            collate_fn=collate_fn,
+        )
 
         self.dlm.eval()
         for p in self.dlm.parameters():
             p.requires_grad = False
 
-        self.bridge.train()
+        self.projector.train()
+
         optimizer = torch.optim.AdamW(
-            self.bridge.parameters(),
-            lr=self.args.lr_bridge,
+            self.projector.parameters(),
+            lr=self.args.lr_projector,
             eps=1e-8,
             weight_decay=0.01,
         )
+
         optimizer.zero_grad()
         global_step = 0
 
         for epoch in range(self.args.epochs):
             total_loss = 0.0
-            pbar = tqdm(loader, desc=f"train_bridge epoch {epoch + 1}")
+            good_steps = 0
+            pbar = tqdm(loader, desc=f"train_projector epoch {epoch + 1}")
 
             for batch in pbar:
                 with torch.no_grad():
-                    if self.args.bridge_input == "gold":
+                    if self.args.projector_input == "gold":
                         z_prefix, _, _ = self.get_gold_plan_embeds(batch["reference"])
-                    elif self.args.bridge_input == "dlm_pred":
-                        z_prefix, _ = self.get_dlm_predicted_z0_for_bridge(batch["article"], batch["reference"])
+                    elif self.args.projector_input == "dlm_pred":
+                        z_prefix, _ = self.get_dlm_predicted_z0_for_projector(
+                            batch["article"],
+                            batch["reference"],
+                        )
                     else:
-                        raise ValueError(f"Unknown bridge_input: {self.args.bridge_input}")
+                        raise ValueError(f"Unknown projector_input: {self.args.projector_input}")
+
+                z_prefix = torch.nan_to_num(
+                    z_prefix,
+                    nan=0.0,
+                    posinf=self.args.latent_clip,
+                    neginf=-self.args.latent_clip,
+                )
+                z_prefix = torch.clamp(z_prefix, -self.args.latent_clip, self.args.latent_clip)
 
                 if not torch.isfinite(z_prefix).all():
-                    print("BAD z_prefix")
+                    print("Skip non-finite z_prefix")
+                    optimizer.zero_grad()
                     continue
 
-                soft_prefix = self.bridge(z_prefix)
+                soft_prefix = self.projector(z_prefix)
 
-                if not torch.isfinite(soft_prefix).all():
-                    print("BAD soft_prefix")
-                    continue
+                soft_prefix = torch.nan_to_num(
+                    soft_prefix,
+                    nan=0.0,
+                    posinf=self.args.latent_clip,
+                    neginf=-self.args.latent_clip,
+                )
+                soft_prefix = torch.clamp(
+                    soft_prefix,
+                    -self.args.latent_clip,
+                    self.args.latent_clip,
+                )
 
                 inputs_embeds, attention_mask, labels = self.build_lm_inputs_with_soft_prefix(
                     batch["article"],
@@ -637,7 +716,13 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
                 )
 
                 if not torch.isfinite(inputs_embeds).all():
-                    print("BAD inputs_embeds")
+                    print("Skip non-finite inputs_embeds")
+                    optimizer.zero_grad()
+                    continue
+
+                if (labels != -100).sum().item() == 0:
+                    print("Skip empty labels")
+                    optimizer.zero_grad()
                     continue
 
                 outputs = self.llm(
@@ -646,36 +731,34 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
                     labels=labels,
                     use_cache=False,
                 )
+
                 loss = outputs.loss
 
                 if not torch.isfinite(loss):
-                    print(" BAD loss",
-                          soft_prefix.min().item(),
-                          soft_prefix.max().item(),
-                          soft_prefix.std().item()
-                          )
-                    continue
-
-                if torch.isnan(loss) or torch.isinf(loss):
-                    print("Skip NaN/Inf bridge batch")
+                    print(
+                        "Skip NaN/Inf projector batch",
+                        "soft_min", soft_prefix.min().item(),
+                        "soft_max", soft_prefix.max().item(),
+                        "soft_std", soft_prefix.std().item(),
+                    )
                     optimizer.zero_grad()
                     continue
-
 
                 (loss / self.args.grad_accum).backward()
 
                 if (global_step + 1) % self.args.grad_accum == 0:
-                    torch.nn.utils.clip_grad_norm_(self.bridge.parameters(), 1.0)
+                    torch.nn.utils.clip_grad_norm_(self.projector.parameters(), 0.5)
                     optimizer.step()
                     optimizer.zero_grad()
 
                 total_loss += loss.item()
+                good_steps += 1
                 global_step += 1
                 pbar.set_postfix({"loss_lm": f"{loss.item():.4f}"})
 
-            avg_loss = total_loss / max(len(loader), 1)
-            print(f"train_bridge epoch={epoch + 1} avg_loss={avg_loss:.4f}")
-            self.save_ckpt(os.path.join(self.args.out_dir, f"bridge_epoch_{epoch + 1}.pt"))
+            avg_loss = total_loss / max(good_steps, 1)
+            print(f"train_projector epoch={epoch + 1} avg_loss={avg_loss:.4f}")
+            self.save_ckpt(os.path.join(self.args.out_dir, f"projector_epoch_{epoch + 1}.pt"))
 
         self.save_ckpt(os.path.join(self.args.out_dir, "final.pt"))
 
@@ -683,7 +766,9 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
     def sample_latent_plan(self, article: str):
         self.dlm.eval()
         article_embeds, article_mask = self.get_article_embeds([article])
+
         shape = (1, self.args.max_plan_len, self.hidden_dim)
+
         z_plan = self.diffusion.sample(
             denoiser=self.dlm,
             shape=shape,
@@ -691,15 +776,40 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
             article_mask=article_mask,
             sample_steps=self.args.sample_steps,
         )
+
+        z_plan = torch.nan_to_num(
+            z_plan,
+            nan=0.0,
+            posinf=self.args.latent_clip,
+            neginf=-self.args.latent_clip,
+        )
         z_plan = torch.clamp(z_plan, -self.args.latent_clip, self.args.latent_clip)
+
         return z_plan
 
     @torch.no_grad()
     def generate_from_latent_plan(self, article: str, z_plan):
-        self.bridge.eval()
+        self.projector.eval()
         self.llm.eval()
 
-        soft_prefix = self.bridge(z_plan)
+        z_plan = torch.nan_to_num(
+            z_plan,
+            nan=0.0,
+            posinf=self.args.latent_clip,
+            neginf=-self.args.latent_clip,
+        )
+        z_plan = torch.clamp(z_plan, -self.args.latent_clip, self.args.latent_clip)
+
+        soft_prefix = self.projector(z_plan)
+
+        soft_prefix = torch.nan_to_num(
+            soft_prefix,
+            nan=0.0,
+            posinf=self.args.latent_clip,
+            neginf=-self.args.latent_clip,
+        )
+        soft_prefix = torch.clamp(soft_prefix, -self.args.latent_clip, self.args.latent_clip)
+
         prompt = self.make_prompt(article)
 
         tok = self.tok(
@@ -714,6 +824,7 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
         soft_prefix = soft_prefix.to(prompt_embeds.dtype)
 
         inputs_embeds = torch.cat([soft_prefix, prompt_embeds], dim=1)
+
         prefix_mask = torch.ones(
             soft_prefix.shape[:2],
             dtype=tok.attention_mask.dtype,
@@ -736,6 +847,7 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
         )
 
         text = self.tok.decode(generated[0], skip_special_tokens=True)
+
         return clean_summary(
             text,
             max_sentences=self.args.max_sentences,
@@ -752,52 +864,54 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
         if not self.args.ckpt:
             raise ValueError("--ckpt is required for infer")
 
-        self.load_ckpt(self.args.ckpt, load_dlm=True, load_bridge=True)
+        self.load_ckpt(self.args.ckpt, load_dlm=True, load_projector=True)
 
         dataset = SummaryDataset(self.args.test_file, max_samples=self.args.max_test_samples)
         loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+
         ensure_dir(os.path.dirname(self.args.output_jsonl) or ".")
 
         with open(self.args.output_jsonl, "w", encoding="utf-8") as fout:
             for batch in tqdm(loader, desc="infer"):
                 article = batch["article"][0]
                 pred = self.generate_one(article)
+
                 row = {
                     "id": batch["id"][0],
                     "article": article,
                     "reference": batch["reference"][0],
                     "pp2_summary": pred,
-                    "method": "dlm_latent_plan_llm_decoder",
+                    "method": "dlm_latent_plan_projector_llm_decoder",
                 }
+
                 fout.write(json.dumps(row, ensure_ascii=False) + "\n")
 
         print("Saved:", self.args.output_jsonl)
 
     def oracle_infer(self):
-        """
-        Upper-bound check: use gold latent plan from reference summary as soft prefix.
-        If oracle is bad, the bridge/prompt design is not useful.
-        If oracle is good but infer is bad, the DLM sampling quality is the bottleneck.
-        """
         if self.args.ckpt:
-            self.load_ckpt(self.args.ckpt, load_dlm=False, load_bridge=True)
+            self.load_ckpt(self.args.ckpt, load_dlm=False, load_projector=True)
 
         dataset = SummaryDataset(self.args.test_file, max_samples=self.args.max_test_samples)
         loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_fn)
+
         ensure_dir(os.path.dirname(self.args.output_jsonl) or ".")
 
         with open(self.args.output_jsonl, "w", encoding="utf-8") as fout:
             for batch in tqdm(loader, desc="oracle_infer"):
                 article = batch["article"][0]
+
                 z_gold, _, _ = self.get_gold_plan_embeds(batch["reference"])
                 pred = self.generate_from_latent_plan(article, z_gold)
+
                 row = {
                     "id": batch["id"][0],
                     "article": article,
                     "reference": batch["reference"][0],
                     "pp2_summary": pred,
-                    "method": "oracle_gold_latent_plan_llm_decoder",
+                    "method": "oracle_gold_latent_plan_projector_llm_decoder",
                 }
+
                 fout.write(json.dumps(row, ensure_ascii=False) + "\n")
 
         print("Saved:", self.args.output_jsonl)
@@ -806,15 +920,24 @@ Write a concise and factual news summary in 2-3 sentences. Do not use bullet poi
 def build_args():
     p = argparse.ArgumentParser()
 
-    p.add_argument("--mode", choices=["train_dlm", "train_bridge", "infer", "oracle_infer"], required=True)
+    p.add_argument(
+        "--mode",
+        choices=["train_dlm", "train_projector", "infer", "oracle_infer"],
+        required=True,
+    )
 
     p.add_argument("--base_llm", default=BASE_LLM)
     p.add_argument("--llm_adapter", default=LLM_ADAPTER)
+
     p.add_argument("--train_file", default=TRAIN_FILE)
     p.add_argument("--test_file", default=TEST_FILE)
     p.add_argument("--out_dir", default=OUT_DIR)
     p.add_argument("--ckpt", default=None)
-    p.add_argument("--output_jsonl", default=os.path.join(OUT_DIR, "test_pp2_latent_plan.jsonl"))
+
+    p.add_argument(
+        "--output_jsonl",
+        default=os.path.join(OUT_DIR, "test_pp2_latent_plan_projector.jsonl"),
+    )
 
     p.add_argument("--max_article_len", type=int, default=MAX_ARTICLE_LEN)
     p.add_argument("--max_plan_len", type=int, default=MAX_PLAN_LEN)
@@ -825,11 +948,14 @@ def build_args():
     p.add_argument("--epochs", type=int, default=EPOCHS)
 
     p.add_argument("--lr_dlm", type=float, default=LR_DLM)
-    p.add_argument("--lr_bridge", type=float, default=LR_BRIDGE)
+    p.add_argument("--lr_projector", type=float, default=LR_PROJECTOR)
 
     p.add_argument("--t", type=int, default=T)
     p.add_argument("--sample_steps", type=int, default=SAMPLE_STEPS)
-    p.add_argument("--latent_clip", type=float, default=5.0)
+
+    p.add_argument("--latent_clip", type=float, default=2.0)
+    p.add_argument("--projector_t_max", type=int, default=500)
+    p.add_argument("--projector_scale", type=float, default=0.1)
 
     p.add_argument("--dlm_layers", type=int, default=4)
     p.add_argument("--dlm_heads", type=int, default=8)
@@ -838,7 +964,8 @@ def build_args():
     p.add_argument("--max_train_samples", type=int, default=20000)
     p.add_argument("--max_test_samples", type=int, default=None)
 
-    p.add_argument("--bridge_input", choices=["dlm_pred", "gold"], default="dlm_pred")
+    p.add_argument("--projector_input", choices=["dlm_pred", "gold"], default="dlm_pred")
+    p.add_argument("--llm_dtype", choices=["fp16", "bf16", "fp32"], default="fp16")
 
     p.add_argument("--max_new_tokens", type=int, default=90)
     p.add_argument("--min_new_tokens", type=int, default=25)
@@ -849,6 +976,7 @@ def build_args():
     p.add_argument("--max_words", type=int, default=90)
 
     p.add_argument("--seed", type=int, default=102)
+    p.add_argument("--max_answer_len", type=int, default=160)
 
     return p.parse_args()
 
@@ -862,8 +990,8 @@ def main():
 
     if args.mode == "train_dlm":
         system.train_dlm()
-    elif args.mode == "train_bridge":
-        system.train_bridge()
+    elif args.mode == "train_projector":
+        system.train_projector()
     elif args.mode == "infer":
         system.infer()
     elif args.mode == "oracle_infer":
