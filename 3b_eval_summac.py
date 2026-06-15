@@ -25,7 +25,6 @@ PRED_KEY = "pp2_summary"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 NLI_MODEL = "roberta-large-mnli"
-BERTSCORE_MODEL = "roberta-large"
 BATCH_SIZE = 16
 
 
@@ -43,19 +42,11 @@ def load_jsonl(path, pred_key):
             if pred_key not in ex:
                 continue
 
-            articles.append(ex.get("article", ""))
-            preds.append(ex.get(pred_key, ""))
-            refs.append(ex.get("reference", ""))
+            articles.append(ex["article"])
+            preds.append(ex[pred_key])
+            refs.append(ex["reference"])
 
     return articles, preds, refs
-
-
-def clean_text(x):
-    if x is None:
-        return ""
-    x = str(x)
-    x = re.sub(r"\s+", " ", x).strip()
-    return x
 
 
 # =========================
@@ -63,7 +54,7 @@ def clean_text(x):
 # =========================
 
 def split_sentences(text):
-    text = clean_text(text)
+    text = text.replace("\n", " ").strip()
     sents = re.split(r"(?<=[.!?])\s+", text)
     sents = [s.strip() for s in sents if len(s.strip()) > 5]
     return sents
@@ -124,9 +115,11 @@ class SummaCZS:
 
             entail_scores = self.entailment_scores(premises, hypotheses)
 
+            # SUMMAC-ZS: max theo document sentences
             best_support = max(entail_scores)
             summary_scores.append(best_support)
 
+        # mean theo summary sentences
         return sum(summary_scores) / len(summary_scores)
 
     def score_batch(self, documents, summaries):
@@ -146,100 +139,84 @@ class SummaCZS:
 # MAIN EVAL
 # =========================
 
-def main():
-    articles, preds, refs = load_jsonl(FILE_PATH, PRED_KEY)
+articles, preds, refs = load_jsonl(FILE_PATH, PRED_KEY)
 
-    print("n_samples raw:", len(preds))
+print("n_samples:", len(preds))
+print("\n===== DEBUG FIRST 5 SAMPLES =====\n")
 
-    articles = [clean_text(x) for x in articles]
-    preds = [clean_text(x) for x in preds]
-    refs = [clean_text(x) for x in refs]
+for i in range(min(5, len(preds))):
+    print(f"Sample {i}")
 
-    filtered = [
-        (a, p, r)
-        for a, p, r in zip(articles, preds, refs)
-        if len(a) > 0 and len(p) > 0 and len(r) > 0
-    ]
+    print("PRED:")
+    print(preds[i])
 
-    if len(filtered) == 0:
-        raise ValueError("No valid samples after filtering.")
+    print("\nREF:")
+    print(refs[i])
 
-    articles, preds, refs = zip(*filtered)
-    articles, preds, refs = list(articles), list(preds), list(refs)
+    print("\nMATCH:", preds[i].strip() == refs[i].strip())
 
-    print("n_samples after filtering:", len(preds))
-    print("device:", DEVICE)
+    print("\n" + "=" * 100 + "\n")
 
-    print("\n===== DEBUG FIRST 5 SAMPLES =====\n")
+# ROUGE
+rouge = evaluate.load("rouge")
+rouge_result = rouge.compute(
+    predictions=preds,
+    references=refs
+)
 
-    for i in range(min(5, len(preds))):
-        print(f"Sample {i}")
+# Clean before metrics
+def clean_text(x):
+    if x is None:
+        return ""
+    x = str(x)
+    x = re.sub(r"\s+", " ", x).strip()
+    return x
 
-        print("PRED:")
-        print(preds[i])
+preds = [clean_text(x) for x in preds]
+refs = [clean_text(x) for x in refs]
 
-        print("\nREF:")
-        print(refs[i])
+# Remove empty pairs
+filtered = [
+    (a, p, r)
+    for a, p, r in zip(articles, preds, refs)
+    if len(p) > 0 and len(r) > 0
+]
 
-        print("\nMATCH:", preds[i].strip() == refs[i].strip())
+articles, preds, refs = zip(*filtered)
+articles, preds, refs = list(articles), list(preds), list(refs)
 
-        print("\n" + "=" * 100 + "\n")
+print("n_samples after filtering:", len(preds))
 
-    # =========================
-    # ROUGE
-    # =========================
+# BERTScore
+P, R, F1 = bert_score(
+    preds,
+    refs,
+    model_type="roberta-large",
+    lang="en",
+    device=DEVICE,
+    batch_size=BATCH_SIZE,
+    rescale_with_baseline=True,
+    verbose=True
+)
 
-    rouge = evaluate.load("rouge")
-    rouge_result = rouge.compute(
-        predictions=preds,
-        references=refs
-    )
+# SUMMAC-ZS
+summac = SummaCZS()
+summac_scores = summac.score_batch(articles, preds)
+avg_summac = sum(summac_scores) / len(summac_scores)
 
-    # =========================
-    # BERTScore
-    # =========================
+result = {
+    "n_samples": len(preds),
 
-    P, R, F1 = bert_score(
-        preds,
-        refs,
-        model_type=BERTSCORE_MODEL,
-        lang="en",
-        device=DEVICE,
-        batch_size=BATCH_SIZE,
-        rescale_with_baseline=True,
-        verbose=True
-    )
+    "rouge1": rouge_result["rouge1"],
+    "rouge2": rouge_result["rouge2"],
+    "rougeL": rouge_result["rougeL"],
+    "rougeLsum": rouge_result["rougeLsum"],
 
-    # =========================
-    # SUMMAC-ZS
-    # =========================
+    "bertscore_precision": P.mean().item(),
+    "bertscore_recall": R.mean().item(),
+    "bertscore_f1": F1.mean().item(),
 
-    summac = SummaCZS()
-    summac_scores = summac.score_batch(articles, preds)
-    avg_summac = sum(summac_scores) / len(summac_scores)
+    "summac_zs": avg_summac
+}
 
-    result = {
-        "file_path": FILE_PATH,
-        "pred_key": PRED_KEY,
-        "n_samples": len(preds),
-
-        "rouge1": rouge_result["rouge1"],
-        "rouge2": rouge_result["rouge2"],
-        "rougeL": rouge_result["rougeL"],
-        "rougeLsum": rouge_result["rougeLsum"],
-
-        "bertscore_model": BERTSCORE_MODEL,
-        "bertscore_rescale_with_baseline": True,
-        "bertscore_precision": P.mean().item(),
-        "bertscore_recall": R.mean().item(),
-        "bertscore_f1": F1.mean().item(),
-
-        "summac_zs": avg_summac
-    }
-
-    print("\n===== FINAL RESULT =====\n")
-    print(json.dumps(result, indent=2))
-
-
-if __name__ == "__main__":
-    main()
+print(json.dumps(result, indent=2))

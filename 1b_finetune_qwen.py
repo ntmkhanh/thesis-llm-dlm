@@ -1,6 +1,8 @@
-import json
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import torch
-from datasets import Dataset
+from datasets import load_dataset
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -9,7 +11,6 @@ from transformers import (
     EarlyStoppingCallback,
 )
 from peft import LoraConfig, get_peft_model
-
 
 # =========================================================
 # CONFIG
@@ -26,35 +27,13 @@ MAX_LENGTH = 1024
 MAX_ANSWER_LENGTH = 160
 MAX_PROMPT_LENGTH = MAX_LENGTH - MAX_ANSWER_LENGTH
 
-# None = train full CNN/DailyMail
 TRAIN_SAMPLES = None
 VALID_SAMPLES = None
 
 
 # =========================================================
-# LOAD DATA
+# PROMPT
 # =========================================================
-
-def load_jsonl(path, max_samples=None):
-    data = []
-
-    with open(path, encoding="utf-8") as f:
-        for i, line in enumerate(f):
-            if max_samples is not None and i >= max_samples:
-                break
-
-            ex = json.loads(line)
-
-            if "article" not in ex or "reference" not in ex:
-                continue
-
-            if not ex["article"].strip() or not ex["reference"].strip():
-                continue
-
-            data.append(ex)
-
-    return Dataset.from_list(data)
-
 
 def make_prompt(article):
     article = article.strip()
@@ -92,6 +71,7 @@ model = AutoModelForCausalLM.from_pretrained(
 
 model.config.use_cache = False
 model.gradient_checkpointing_enable()
+model.enable_input_require_grads()
 
 
 # =========================================================
@@ -124,8 +104,16 @@ model.print_trainable_parameters()
 # =========================================================
 
 def preprocess(ex):
-    prompt = make_prompt(ex["article"])
-    answer = ex["reference"].strip() + tokenizer.eos_token
+    article = ex.get("article", "")
+    reference = ex.get("reference", "")
+
+    if article is None:
+        article = ""
+    if reference is None:
+        reference = ""
+
+    prompt = make_prompt(article)
+    answer = reference.strip() + tokenizer.eos_token
 
     prompt_tok = tokenizer(
         prompt,
@@ -172,8 +160,39 @@ def preprocess(ex):
 
 print("Loading dataset...")
 
-train_ds = load_jsonl(TRAIN_FILE, TRAIN_SAMPLES)
-valid_ds = load_jsonl(VALID_FILE, VALID_SAMPLES)
+train_ds = load_dataset(
+    "json",
+    data_files=TRAIN_FILE,
+    split="train",
+)
+
+valid_ds = load_dataset(
+    "json",
+    data_files=VALID_FILE,
+    split="train",
+)
+
+# Optional subset
+if TRAIN_SAMPLES is not None:
+    train_ds = train_ds.select(range(min(TRAIN_SAMPLES, len(train_ds))))
+
+if VALID_SAMPLES is not None:
+    valid_ds = valid_ds.select(range(min(VALID_SAMPLES, len(valid_ds))))
+
+# Remove empty samples
+train_ds = train_ds.filter(
+    lambda ex: ex.get("article") is not None
+    and ex.get("reference") is not None
+    and ex["article"].strip() != ""
+    and ex["reference"].strip() != ""
+)
+
+valid_ds = valid_ds.filter(
+    lambda ex: ex.get("article") is not None
+    and ex.get("reference") is not None
+    and ex["article"].strip() != ""
+    and ex["reference"].strip() != ""
+)
 
 print("Train samples:", len(train_ds))
 print("Valid samples:", len(valid_ds))
@@ -182,12 +201,14 @@ train_ds = train_ds.map(
     preprocess,
     remove_columns=train_ds.column_names,
     desc="Tokenizing train",
+    load_from_cache_file=True,
 )
 
 valid_ds = valid_ds.map(
     preprocess,
     remove_columns=valid_ds.column_names,
     desc="Tokenizing valid",
+    load_from_cache_file=True,
 )
 
 
@@ -257,6 +278,7 @@ args = TrainingArguments(
     save_strategy="steps",
     save_steps=2000,
     save_total_limit=2,
+    save_safetensors=True,
 
     load_best_model_at_end=True,
     metric_for_best_model="eval_loss",
@@ -265,7 +287,7 @@ args = TrainingArguments(
     report_to="none",
     remove_unused_columns=False,
 
-    dataloader_num_workers=2,
+    dataloader_num_workers=0,
 )
 
 
@@ -286,7 +308,20 @@ trainer = Trainer(
     ],
 )
 
-trainer.train()
+
+from transformers.trainer_utils import get_last_checkpoint
+
+last_checkpoint = None
+
+if os.path.isdir(OUTPUT_DIR):
+    last_checkpoint = get_last_checkpoint(OUTPUT_DIR)
+
+if last_checkpoint is not None:
+    print("Resuming from checkpoint:", last_checkpoint)
+    trainer.train(resume_from_checkpoint=last_checkpoint)
+else:
+    print("No checkpoint found. Training from scratch.")
+    trainer.train()
 
 
 # =========================================================
