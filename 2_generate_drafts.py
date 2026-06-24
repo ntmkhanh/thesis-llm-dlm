@@ -10,12 +10,12 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--base_model", type=str, default="Qwen/Qwen2.5-1.5B-Instruct")
-    parser.add_argument("--adapter", type=str, default="outputs/qwen_summarizer/final")
+    parser.add_argument("--adapter", type=str, default="outputs/qwen_summarizer_146/final")
 
-    parser.add_argument("--input", type=str, default="data/test.jsonl")
-    parser.add_argument("--output", type=str, default="data/test_drafts_sample.jsonl")
+    parser.add_argument("--input", type=str, default="D:\\thesis-llm-dlm\data\\test_parts\\test_part_2.jsonl")
+    parser.add_argument("--output", type=str, default="D:\\thesis-llm-dlm\outputs\draft\\test_draft_part_2.jsonl")
 
-    parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max_input_tokens", type=int, default=900)
     parser.add_argument("--max_new_tokens", type=int, default=128)
     parser.add_argument("--num_beams", type=int, default=4)
