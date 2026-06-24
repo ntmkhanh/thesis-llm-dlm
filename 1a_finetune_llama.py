@@ -29,6 +29,9 @@ MAX_PROMPT_LENGTH = MAX_LENGTH - MAX_ANSWER_LENGTH
 # None = train full CNN/DailyMail
 TRAIN_SAMPLES = None
 VALID_SAMPLES = None
+=======
+TRAIN_SAMPLES = 100000
+VALID_SAMPLES = 10000
 
 
 # =========================================================
@@ -264,8 +267,13 @@ args = TrainingArguments(
 
     report_to="none",
     remove_unused_columns=False,
+<<<<<<< HEAD
 
     dataloader_num_workers=2,
+=======
+    # max_grad_norm=1.0,
+    max_grad_norm=0.5,
+>>>>>>> 5fcdd09 (back)
 )
 
 
